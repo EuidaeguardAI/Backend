@@ -4,5 +4,3 @@ __pycache__/
 .env
 data/
 app/rag/vector_store.json
-
-knowledge-sources/

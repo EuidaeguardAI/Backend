@@ -20,7 +20,12 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
 from app.config import CHAT_MODEL, OPENAI_API_KEY
-from app.graph.recommendation_graph import PINNED_SECTIONS, _format_knowledge
+from app.graph.recommendation_graph import (
+    DEFAULT_PINNED_SECTIONS,
+    PINNED_SECTIONS,
+    PROBLEM_TYPE_HINTS,
+    _format_knowledge,
+)
 from app.rag.retrieve import retrieve_relevant_chunks
 from app.safety.emergency_rules import (
     build_fixed_safety_recommendation,
@@ -53,24 +58,10 @@ SYSTEM_PROMPT = """당신은 "응대가드 AI"의 응대 상담 챗봇입니다.
 8. 모든 출력(answer, sayNow, nextActions, doNot, citations)은 **반드시 한국어**로만 작성하세요.
    영어 단어나 로마자 표기를 섞지 말고, 고유명사를 빼면 우리말 표현을 쓰세요.
 9. 이전 대화가 함께 주어지면 이어지는 질문("그럼 영수증이 없으면요?")의 생략된 주어를 그 맥락에서 채워 이해하세요.
-10. "자동 감지된 위험 표현"이 함께 주어지면 위험도 판단의 참고 신호로만 쓰세요. 오탐일 수 있으니 질문의 실제 맥락을 우선하세요."""
-
-# 질문에 이 말이 들어 있으면 그 문제 유형으로 보고 PINNED_SECTIONS를 적용한다.
-# 설문(intake)이 없는 경로라 문제 유형을 질문 문장에서 직접 짐작해야 한다.
-PROBLEM_TYPE_HINTS: dict[str, tuple[str, ...]] = {
-    "refund_exchange": ("환불", "교환", "반품", "영수증", "결제 취소"),
-    "damage_contamination": (
-        "상했",
-        "변질",
-        "부패",
-        "곰팡이",
-        "유통기한",
-        "소비기한",
-        "이물",
-        "오염",
-        "파손",
-    ),
-}
+10. "자동 감지된 위험 표현"이 함께 주어지면 위험도 판단의 참고 신호로만 쓰세요. 오탐일 수 있으니 질문의 실제 맥락을 우선하세요.
+11. 여러 개를 구매해 일부는 이미 먹거나 쓴 뒤 나머지에서 문제를 제기하는 질문에는, 전체 수량을
+    자동으로 환불 대상에 포함해 답하지 마세요. 실제로 문제가 확인된 수량과 이미 먹거나 쓴 부분의
+    이상 여부부터 확인하라고 nextActions에 넣으세요."""
 
 
 # 폭언·위협 질문도 환불 질의와 같은 문제를 겪는다. 직원이 쓰는 말("계속 소리를 질러요")과
@@ -156,13 +147,20 @@ def _pinned_sections(state: AskState) -> tuple[str, ...]:
     if any(hint in question for hint in SAFETY_HINTS):
         sections.extend(SAFETY_SECTIONS)
 
-    if profile is not None:
-        for problem_type, hints in PROBLEM_TYPE_HINTS.items():
-            if not any(hint in question for hint in hints):
-                continue
-            for section in PINNED_SECTIONS.get((profile.industryId, problem_type), ()):
-                if section not in sections:
-                    sections.append(section)
+    # '물어보기'는 설문 없이 바로 묻는 빠른 경로라 업종(profile)이 아예 없는 채로 오는 경우가
+    # 흔하다. profile이 없거나 그 업종에 대한 PINNED_SECTIONS가 없으면 업종 무관 기본값으로
+    # 대체한다 — 그렇지 않으면 힌트가 정확히 맞아도 근거가 하나도 안 잡힌다.
+    for problem_type, hints in PROBLEM_TYPE_HINTS.items():
+        if not any(hint in question for hint in hints):
+            continue
+        pinned = ()
+        if profile is not None:
+            pinned = PINNED_SECTIONS.get((profile.industryId, problem_type), ())
+        if not pinned:
+            pinned = DEFAULT_PINNED_SECTIONS.get(problem_type, ())
+        for section in pinned:
+            if section not in sections:
+                sections.append(section)
 
     return tuple(sections)
 

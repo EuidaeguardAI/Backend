@@ -63,7 +63,10 @@ SYSTEM_PROMPT = """당신은 "응대가드 AI"의 응대 보조 엔진입니다.
     안내하지 말고, "소비자 귀책사유로 발생한 손상은 사업자가 책임지지 않을 수 있다"는 근거 문서
     내용을 함께 반영해 보관 방법·방치 시간 등 사실관계부터 확인하도록 안내하세요. 이때도
     "환불 안 해줘도 됩니다" 같은 확정적 판단은 하지 말고, "확인이 필요합니다"처럼 운영 안내 톤을
-    유지하세요."""
+    유지하세요.
+11. 여러 개를 구매해 그중 일부는 이미 먹거나 쓴 뒤 나머지에서 문제를 제기하는 경우, 전체 수량을
+    자동으로 환불 대상에 포함하지 마세요. 실제로 문제가 확인된 수량이 몇 개인지, 이미 먹거나 쓴
+    부분에서도 이상(맛·냄새·몸 상태 등)이 있었는지부터 확인하도록 nextActions에 넣으세요."""
 
 PROBLEM_TYPE_LABEL = {
     "refund_exchange": "환불·교환",
@@ -129,12 +132,90 @@ PINNED_SECTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     ("restaurant_cafe", "refund_exchange"): ("식료품(19개 업종)", "[별표 1]", "식료품"),
 }
 
+# 마이크 경로는 UI 개편 이후 intake.problemTypes를 더 이상 채우지 않는다("빠른 상황 입력" 생략).
+# 그러면 위 PINNED_SECTIONS는 업종을 알아도 절대 걸리지 않는다. 그래서 손님 발화 자체에서
+# 문제 유형을 짐작할 힌트를 두고(ask_graph의 PROBLEM_TYPE_HINTS와 같은 목적), problemTypes가
+# 비어 있을 때의 안전망으로 쓴다.
+#
+# 주의(2026-09 재발 방지): 한국어 용언은 어간에 어미가 붙으며 음절 자체가 바뀐다
+# ("상하다" + "ㄴ" → "상한", "상하다" + "았다" → "상했다"). "상했"처럼 활용형 하나만
+# 문자열로 넣으면 "상한 냄새가 나요"처럼 아주 흔한 다른 활용형은 부분 문자열로도
+# 걸리지 않아 pinned_sections가 통째로 비고, 순수 유사도 검색만으로는 이 조항이
+# 콜로키얼한 질의에서 순위가 크게 밀린다(retrieve_relevant_chunks 주석 참고) — 그 결과
+# citations가 비어 "근거 문서에서 확인되지 않아 일반적인 응대 원칙으로 답했습니다"가
+# 나온다. 그래서 자주 쓰는 활용형·구어체 동의어를 개별 문자열로 나열해 둔다(형태소
+# 분석기 없이 substring 매칭만 쓰는 한계를 우회하는 임시 방편이다).
+PROBLEM_TYPE_HINTS: dict[str, tuple[str, ...]] = {
+    "refund_exchange": (
+        "환불",
+        "교환",
+        "반품",
+        "영수증",
+        "결제 취소",
+        "돈 돌려",
+        "물러주",
+        "물러줘",
+        "바꿔주",
+        "바꿔줘",
+        "취소해",
+    ),
+    "damage_contamination": (
+        "상했",
+        "상한",
+        "상하고",
+        "상해서",
+        "상함",
+        "상하네",
+        "상하나",
+        "상하는",
+        "상할",
+        "변질",
+        "부패",
+        "곰팡이",
+        "유통기한",
+        "소비기한",
+        "이물",
+        "오염",
+        "파손",
+        "쉰내",
+        "쉬었",
+        "썩",
+        "구더기",
+        "냄새",
+    ),
+}
+
+# industryId조차 없거나(온보딩 전) PINNED_SECTIONS에 해당 업종 항목이 없을 때 쓰는 업종
+# 무관 기본값. 식료품 조항은 특정 업종 전유물이 아니라 온보딩 여부와 무관하게 근거가 된다.
+DEFAULT_PINNED_SECTIONS: dict[str, tuple[str, ...]] = {
+    "refund_exchange": ("식료품(19개 업종)", "[별표 1]", "식료품"),
+    "damage_contamination": ("식료품(19개 업종)", "식료품"),
+}
+
+
+def _infer_problem_types(state: GraphState) -> list[str]:
+    """intake.problemTypes가 비어 있을 때 손님 발화에서 문제 유형을 짐작한다."""
+    text = " ".join(
+        [state["latest_text"]]
+        + [turn.text for turn in state["recent_transcript"] if turn.speaker == "customer"]
+    )
+    return [
+        problem_type
+        for problem_type, hints in PROBLEM_TYPE_HINTS.items()
+        if any(hint in text for hint in hints)
+    ]
+
 
 def _pinned_sections(state: GraphState) -> tuple[str, ...]:
     industry_id = state["profile"].industryId
+    problem_types = state["intake"].problemTypes or _infer_problem_types(state)
+
     sections: list[str] = []
-    for problem_type in state["intake"].problemTypes:
-        for section in PINNED_SECTIONS.get((industry_id, problem_type), ()):
+    for problem_type in problem_types:
+        pinned = PINNED_SECTIONS.get((industry_id, problem_type)) or DEFAULT_PINNED_SECTIONS.get(
+            problem_type, ()
+        )
+        for section in pinned:
             if section not in sections:
                 sections.append(section)
     return tuple(sections)

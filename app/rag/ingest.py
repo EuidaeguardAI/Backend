@@ -1,8 +1,8 @@
 """
-지식베이스 임베딩 사전 계산 스크립트.
+지식베이스 문서 수집·청킹 및 Chroma 색인 진입점.
 knowledge-sources/ 안의 문서를 재귀 순회하며 청크로 나누고 OpenAI 임베딩을 계산해
-app/rag/vector_store.json 으로 저장한다 (LangChain InMemoryVectorStore.dump).
-문서가 바뀔 때만 다시 실행하면 되고, 런타임(API)은 이 파일을 로드만 한다.
+Chroma 저장·이전·갱신은 app.rag.manage에서 담당한다.
+런타임 API에서는 문서 색인과 문서 임베딩을 실행하지 않는다.
 
 지원 형식: .md 뿐이다. 원본 PDF·DOCX는 전부 Markdown으로 변환해서 넣는다(변환본만 저장소에
 둔다). PDF 텍스트 추출은 표를 줄바꿈된 평문으로 뭉개서 "분쟁유형 / 해결기준 / 비고"의 열 대응이
@@ -12,7 +12,7 @@ app/rag/vector_store.json 으로 저장한다 (LangChain InMemoryVectorStore.dum
 레지스트리에 없는 파일도 인덱싱되지만 경고를 남기므로, 새 자료를 넣으면 레지스트리에 등록할 것.
 "_" 로 시작하는 하위 폴더는 수집 대상에서 통째로 제외된다.
 
-실행: python -m app.rag.ingest
+실행: python -m app.rag.manage reindex --yes
 """
 
 import re
@@ -20,11 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from langchain_core.documents import Document
-from langchain_core.vectorstores import InMemoryVectorStore
-from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app.config import EMBEDDING_MODEL, KNOWLEDGE_SOURCES_DIR, VECTOR_STORE_PATH
+from app.config import KNOWLEDGE_SOURCES_DIR
+from app.rag.chroma_store import stable_document_id
 
 CHUNK_CHARS = 700
 CHUNK_OVERLAP = 120
@@ -392,7 +391,7 @@ def build_documents() -> list[Document]:
             continue
 
         chunks = LOADERS[path.suffix.lower()](path)
-        for chunk in chunks:
+        for chunk_index, chunk in enumerate(chunks):
             documents.append(
                 Document(
                     page_content=contextualize(spec, chunk),
@@ -403,6 +402,8 @@ def build_documents() -> list[Document]:
                         "page": chunk["page"],
                         "industries": list(spec.industries),
                         "sourcePath": key,
+                        "documentId": stable_document_id(key),
+                        "chunkIndex": chunk_index,
                     },
                 )
             )
@@ -411,14 +412,10 @@ def build_documents() -> list[Document]:
 
 
 def main() -> None:
-    print(f"지식베이스 수집: {KNOWLEDGE_SOURCES_DIR}")
-    documents = build_documents()
-    print(f"\n총 {len(documents)}개 청크에 대해 임베딩을 계산합니다...")
+    # 예전 진입점은 남겨 두되, 비용 안내 후 새 collection을 만드는 관리 CLI로 위임한다.
+    from app.rag.manage import main as manage_main
 
-    embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
-    store = InMemoryVectorStore.from_documents(documents, embeddings)
-    store.dump(str(VECTOR_STORE_PATH))
-    print(f"완료: {len(documents)}개 청크를 {VECTOR_STORE_PATH}에 저장했습니다.")
+    manage_main(["reindex"])
 
 
 if __name__ == "__main__":

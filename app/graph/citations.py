@@ -9,8 +9,8 @@
 적은 위치 표기(실측에서 "식료품 식료품"처럼 같은 말을 두 번 적는 경우가 잦았다)보다 색인
 당시의 메타데이터가 정확하기 때문이다.
 
-문장이 확인되지 않으면 quote만 떼고 인용 자체는 남긴다. 지어낸 문장을 형광펜으로 강조해
-"이게 근거입니다"라고 보여주는 것이 가장 나쁜 실패다.
+문장이 확인되지 않으면 문서명·조항·인용문 전체를 응답에서 제외한다.
+검색 결과에 없는 근거 표시를 남기는 것보다 근거 없음을 드러내는 편이 안전하다.
 """
 
 import re
@@ -66,14 +66,6 @@ def _describe_location(document: Document) -> str | None:
     return None
 
 
-def _source_type_by_title(label: str, retrieved: list[Document]) -> str | None:
-    """인용 문장을 못 찾았을 때라도 문서 종류만은 제목으로 맞춰 본다."""
-    for document in retrieved:
-        if document.metadata.get("documentTitle") == label:
-            return document.metadata.get("sourceType")
-    return None
-
-
 def ground_citations(
     citations: list[CitationDraft], retrieved: list[Document]
 ) -> list[Citation]:
@@ -91,20 +83,14 @@ def ground_citations(
                 (document for content, document in indexed if needle in content), None
             )
 
-        if source is not None:
-            resolved = Citation(
-                label=source.metadata.get("documentTitle") or citation.label,
-                section=_describe_location(source) or citation.section,
-                quote=_shorten(quote),
-                sourceType=source.metadata.get("sourceType"),
-            )
-        else:
-            resolved = Citation(
-                label=citation.label,
-                section=citation.section,
-                quote=None,
-                sourceType=_source_type_by_title(citation.label, retrieved),
-            )
+        if source is None:
+            continue
+        resolved = Citation(
+            label=source.metadata.get("documentTitle") or citation.label,
+            section=_describe_location(source) or citation.section,
+            quote=_shorten(quote),
+            sourceType=source.metadata.get("sourceType"),
+        )
 
         key = (resolved.label, resolved.section, resolved.quote)
         if key in seen:

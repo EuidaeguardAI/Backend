@@ -1,3 +1,6 @@
+import logging
+import time
+
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from openai import OpenAI
 
@@ -8,6 +11,7 @@ from app.stt_hints import STT_PROMPT
 
 router = APIRouter()
 _client = OpenAI(api_key=OPENAI_API_KEY)
+logger = logging.getLogger(__name__)
 
 # whisper-1은 구간마다 "여기엔 말이 없었을 확률"(no_speech_prob)을 같이 준다.
 # 이 값이 높고 인식 신뢰도(avg_logprob)가 낮으면 무음에 대고 지어낸 문장으로 본다.
@@ -39,33 +43,56 @@ def _drop_silent_segments(transcription) -> str:  # noqa: ANN001
 
 @router.post("/stt", response_model=SttResponse)
 def transcribe(audio: UploadFile = File(...)) -> SttResponse:
+    request_started_at = time.perf_counter()
+    file_bytes = b""
     try:
         file_bytes = audio.file.read()
         use_verbose = _supports_no_speech_prob(TRANSCRIBE_MODEL)
-        transcription = _client.audio.transcriptions.create(
-            file=(
-                audio.filename or "chunk.webm",
-                file_bytes,
-                audio.content_type or "audio/webm",
-            ),
-            model=TRANSCRIBE_MODEL,
-            # 한국어로 고정한다. 자동 감지에 맡기면 짧은 구간(감탄사, 욕설 한 마디)에서
-            # 엉뚱한 언어로 잡혀 영어·일본어 문장이 섞여 들어온다.
-            language="ko",
-            # 매장 용어·폭언 표현을 미리 알려 인식률을 올린다. (app/stt_hints.py)
-            prompt=STT_PROMPT,
-            temperature=0,
-            response_format="verbose_json" if use_verbose else "json",
-        )
+        transcription_started_at = time.perf_counter()
+        try:
+            transcription = _client.audio.transcriptions.create(
+                file=(
+                    audio.filename or "chunk.webm",
+                    file_bytes,
+                    audio.content_type or "audio/webm",
+                ),
+                model=TRANSCRIBE_MODEL,
+                # 한국어로 고정한다. 자동 감지에 맡기면 짧은 구간(감탄사, 욕설 한 마디)에서
+                # 엉뚱한 언어로 잡혀 영어·일본어 문장이 섞여 들어온다.
+                language="ko",
+                # 매장 용어·폭언 표현을 미리 알려 인식률을 올린다. (app/stt_hints.py)
+                prompt=STT_PROMPT,
+                temperature=0,
+                response_format="verbose_json" if use_verbose else "json",
+            )
+        finally:
+            logger.info(
+                "STT timing stage=transcription elapsed_ms=%.1f model=%s bytes=%d",
+                (time.perf_counter() - transcription_started_at) * 1000,
+                TRANSCRIBE_MODEL,
+                len(file_bytes),
+            )
         raw = (
             _drop_silent_segments(transcription)
             if use_verbose
             else (transcription.text or "")
         )
     except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "STT timing stage=total elapsed_ms=%.1f bytes=%d status=failed",
+            (time.perf_counter() - request_started_at) * 1000,
+            len(file_bytes),
+        )
         raise HTTPException(status_code=502, detail="음성 인식에 실패했습니다.") from exc
 
     # 무음 구간에서 모델이 지어낸 문장을 거른다. 걸러낸 경우 빈 문자열을 돌려주면
     # 프론트엔드는 "이번 구간에는 아무 말도 없었다"로 처리한다. (app/stt_filters.py)
-    text, filtered = filter_transcript(raw)
-    return SttResponse(text=text, filtered=filtered)
+    try:
+        text, filtered = filter_transcript(raw)
+        return SttResponse(text=text, filtered=filtered)
+    finally:
+        logger.info(
+            "STT timing stage=total elapsed_ms=%.1f bytes=%d",
+            (time.perf_counter() - request_started_at) * 1000,
+            len(file_bytes),
+        )

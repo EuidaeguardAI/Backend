@@ -1,9 +1,36 @@
+"""공통 Chroma 검색 계층.
+
+실시간 추천과 물어보기 챗봇이 모두 이 함수를 사용한다.
+"""
+
+from __future__ import annotations
+
+import logging
 from functools import lru_cache
 
 from langchain_core.documents import Document
-from langchain_core.vectorstores import InMemoryVectorStore
-from langchain_openai import OpenAIEmbeddings
 
+from app.rag.chroma_store import (
+    ChromaCompatibilityError,
+    ChromaStoreError,
+    ChromaStoreHandle,
+    industry_filter,
+    metadata_from_chroma,
+    open_runtime_store,
+)
+
+MAX_PER_DOCUMENT = 2
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def get_vector_store() -> ChromaStoreHandle | None:
+    """PersistentClient, collection, LangChain Chroma wrapper를 프로세스 내에서 재사용한다."""
+    return open_runtime_store()
+
+
+def clear_vector_store_cache() -> None:
+    get_vector_store.cache_clear()
 from app.config import EMBEDDING_MODEL, VECTOR_STORE_PATH
 from app.http_client import shared_http_client
 
@@ -24,12 +51,7 @@ def _matches(document: Document, sections: tuple[str, ...]) -> bool:
 
 
 def _matches_industry(document: Document, industry_id: str | None) -> bool:
-    """온보딩에서 고른 업종의 사정권 안에 있는 청크인지 본다.
-
-    ingest가 청크마다 넣어둔 industries를 그대로 쓴다("*"는 전 업종 공통). 편의점 실무
-    매뉴얼이 병원·부동산 세션의 근거 후보로 올라오는 것을 막는 용도다. 업종을 모르거나
-    industries가 없는 옛 색인은 통과시킨다 - 걸러서 후보가 통째로 비는 쪽이 더 나쁘다.
-    """
+    """업종을 모르거나 industries가 없는 예전 색인은 기존 정책대로 통과시킨다."""
     if industry_id is None:
         return True
     industries = document.metadata.get("industries")
@@ -38,65 +60,105 @@ def _matches_industry(document: Document, industry_id: str | None) -> bool:
     return "*" in industries or industry_id in industries
 
 
-MAX_PER_DOCUMENT = 2
+def _query_by_vector(
+    handle: ChromaStoreHandle,
+    query_vector: list[float],
+    *,
+    n_results: int,
+    industry_id: str | None,
+    section_contains: str | None = None,
+) -> list[tuple[Document, float | None]]:
+    if n_results <= 0:
+        return []
+    where = industry_filter(industry_id)
+    where_document = None
+    if section_contains is not None:
+        # Chroma는 스칼라 메타데이터 문자열의 부분 일치를 지원하지 않는다.
+        # ingest가 page_content 머리글에 section을 포함하므로 문서 필터로 먼저
+        # 좁힌 뒤, 아래에서 section 메타데이터를 다시 검증한다.
+        where_document = {"$contains": section_contains}
+    try:
+        documents = handle.vector_store.similarity_search_by_vector(
+            query_vector,
+            k=n_results,
+            filter=where,
+            where_document=where_document,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Chroma 검색 실패(collection=%s)", handle.collection.name)
+        raise ChromaStoreError(f"Chroma 검색 중 DB 오류가 발생했습니다: {exc}") from exc
+    return [
+        (
+            Document(
+                id=document.id,
+                page_content=document.page_content,
+                metadata=metadata_from_chroma(document.metadata),
+            ),
+            None,
+        )
+        for document in documents
+    ]
 
 
-def retrieve_relevant_chunks(
-    query_text: str,
+def retrieve_relevant_chunks_by_vector(
+    query_vector: list[float],
+    *,
     top_k: int = 5,
     pinned_sections: tuple[str, ...] = (),
     industry_id: str | None = None,
+    store_handle: ChromaStoreHandle | None = None,
 ) -> list[Document]:
-    """유사도 검색 결과에, 반드시 함께 봐야 할 조항(pinned_sections)을 앞에 붙여 돌려준다.
+    """이미 계산한 하나의 질의 벡터를 pinned/일반 검색에 모두 재사용한다."""
+    handle = store_handle if store_handle is not None else get_vector_store()
+    if handle is None:
+        return []
+    if len(query_vector) != handle.embedding_dimension:
+        raise ChromaCompatibilityError(
+            f"질의 임베딩 차원({len(query_vector)})과 Chroma collection 차원"
+            f"({handle.embedding_dimension})이 다릅니다. 임베딩 모델·dimensions·collection을 확인하세요."
+        )
 
-    직원이 실제로 하는 말("요구르트가 빵빵해졌대요")과 고시 표 본문("2) 부패, 변질 o 제품교환
-    또는 구입가 환급")은 어휘가 너무 달라서, 벡터 검색만으로는 정작 근거가 되는 조항이 밀려난다.
-    실측에서 이 조항은 법률용어 질의("식료품 부패 변질 환불 기준")로는 1위였지만 구어체
-    질의로는 39위였다. 게다가 별표Ⅱ에는 "제품교환 또는 구입가 환급"이라고만 적힌 비슷한
-    조항이 업종별로 수십 개라, 질의를 보강해도 엉뚱한 업종 조항이 대신 올라온다.
-
-    그래서 품목이 사전에 정해지는 경우(편의점의 환불 분쟁이면 별표Ⅱ 식료품)에는 검색에
-    맡기지 않고 해당 섹션을 직접 지정한다. 지정된 섹션 안에서는 여전히 유사도로 고른다.
-
-    industry_id를 주면 pinned/유사도 양쪽 모두 해당 업종용 문서와 전 업종 공통 문서로만
-    후보를 좁힌다(_matches_industry 참고).
-    """
-    store = get_vector_store()
-    if store is None:
+    try:
+        collection_count = handle.collection.count()
+    except Exception as exc:  # noqa: BLE001
+        raise ChromaStoreError(f"Chroma collection 건수를 확인하지 못했습니다: {exc}") from exc
+    if collection_count == 0:
         return []
 
     documents: list[Document] = []
     seen: set[str] = set()
 
-    # 섹션마다 따로 top-1을 뽑는다. 하나의 필터로 묶어 k=2를 뽑으면, 질의와 어휘가 가까운
-    # 섹션(예: "식료품(19개 업종)")이 두 자리를 다 차지해서 어휘가 먼 섹션(예: 일반기준의
-    # "소비자 취급 잘못" 조항)이 후보에서 아예 밀려난다. 지정한 섹션은 모두 최소 1개씩
-    # 근거 후보에 들어가야 한다.
+    # pinned section별로 최소 1건을 보장한다. 겹치는 section 문자열이 있으므로
+    # 전체 매칭 후보를 거리순으로 받고 중복이 아닌 첫 건을 선택한다.
     for section in pinned_sections:
-        # k=1이면 앞선 섹션에서 이미 뽑힌 청크와 우연히 같은 청크가 다시 1등으로 나올 때
-        # (예: "식료품"과 "식료품(19개 업종)"처럼 섹션 문자열이 겹치는 경우) 이 섹션 몫이
-        # 통째로 비어버린다. k=3으로 여유를 두고 아직 안 뽑힌 첫 번째 결과를 쓴다.
-        for document in store.similarity_search(
-            query_text,
-            k=3,
-            filter=lambda d: _matches(d, (section,)) and _matches_industry(d, industry_id),
-        ):
+        candidates = _query_by_vector(
+            handle,
+            query_vector,
+            n_results=collection_count,
+            industry_id=industry_id,
+            section_contains=section,
+        )
+        for document, _distance in candidates:
+            # where_document에 본문 우연 일치가 있을 수 있으므로 기존 section 조건을 재검증한다.
+            if not _matches(document, (section,)) or not _matches_industry(document, industry_id):
+                continue
             if document.page_content in seen:
                 continue
             documents.append(document)
             seen.add(document.page_content)
             break
 
-    # 한 문서가 자리를 독식하지 않게 문서당 상한을 둔다. 식품등의 표시기준처럼 청크가 많은
-    # 고시는 상위 5칸을 전부 차지해버려서 정작 필요한 매뉴얼·해결기준이 밀려난다.
     per_document: dict[str, int] = {}
-    candidate_pool = max(top_k * 8, 40)
-    for document, _score in store.similarity_search_with_score(
-        query_text, k=candidate_pool, filter=lambda d: _matches_industry(d, industry_id)
+    candidate_pool = min(max(top_k * 8, 40), collection_count)
+    for document, _distance in _query_by_vector(
+        handle,
+        query_vector,
+        n_results=candidate_pool,
+        industry_id=industry_id,
     ):
         if len(documents) >= top_k + len(pinned_sections):
             break
-        if document.page_content in seen:
+        if not _matches_industry(document, industry_id) or document.page_content in seen:
             continue
         title = document.metadata.get("documentTitle") or ""
         if per_document.get(title, 0) >= MAX_PER_DOCUMENT:
@@ -106,3 +168,28 @@ def retrieve_relevant_chunks(
         seen.add(document.page_content)
 
     return documents
+
+
+def retrieve_relevant_chunks(
+    query_text: str,
+    top_k: int = 5,
+    pinned_sections: tuple[str, ...] = (),
+    industry_id: str | None = None,
+) -> list[Document]:
+    """기존 호출 계약을 유지하며 Chroma에서 근거 청크를 검색한다.
+
+    질의 임베딩은 이 호출에서 단 한 번만 계산하고 pinned 및 일반
+    검색에 같은 벡터를 사용한다. Chroma의 cosine distance를 기존 similarity
+    score와 같은 범위/방향으로 간주하지 않고, 순위만 사용한다.
+    """
+    handle = get_vector_store()
+    if handle is None:
+        return []
+    query_vector = handle.embeddings.embed_query(query_text)
+    return retrieve_relevant_chunks_by_vector(
+        query_vector,
+        top_k=top_k,
+        pinned_sections=pinned_sections,
+        industry_id=industry_id,
+        store_handle=handle,
+    )

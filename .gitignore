@@ -1,6 +1,9 @@
 .venv/
+.uv-python/
+.uv-cache/
 __pycache__/
 *.pyc
 .env
 data/
 app/rag/vector_store.json
+data/chroma/

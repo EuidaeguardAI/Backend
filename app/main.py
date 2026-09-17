@@ -1,3 +1,5 @@
+import logging
+
 from contextlib import asynccontextmanager
 
 import anyio
@@ -9,6 +11,12 @@ from app.rag.retrieve import retrieve_relevant_chunks
 from app.routers import analyze, ask, report, stt
 
 
+# RAG 처리 시간 같은 애플리케이션 INFO 로그가 uvicorn 실행 시에도 보이게 한다.
+# 이미 외부 로깅 설정이 있으면 handler를 중복 추가하지 않는다.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger().setLevel(logging.INFO)
+
+app = FastAPI(title="응대가드 AI 백엔드")
 def _warm_up() -> None:
     """지식베이스를 읽어 두고 OpenAI 연결까지 미리 맺어 둔다.
 

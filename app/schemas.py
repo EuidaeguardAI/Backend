@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 RiskLevel = Literal["normal", "dispute", "abuse", "threat", "emergency"]
 Speaker = Literal["customer", "staff", "ai"]
+ResponseMode = Literal["full", "compact"]
 
 
 class CitationDraft(BaseModel):
@@ -33,8 +34,8 @@ class Recommendation(BaseModel):
     riskLevel: int
     confidence: float
     sayNow: str
-    glanceSummary: str
-    ttsText: str
+    glanceSummary: Optional[str] = None
+    ttsText: Optional[str] = None
     nextActions: list[str]
     doNot: list[str]
     citations: list[Citation]
@@ -43,8 +44,11 @@ class Recommendation(BaseModel):
     # 손님이 다음에 할 법한 짧은 답변 후보(예: "상했어요" / "안 상했어요"). 사실 확인이 필요 없으면 빈 배열.
     expectedReplies: list[str] = []
     createdAtMs: int
+    responseMode: ResponseMode = "full"
 
 
+class FullRecommendationDraft(BaseModel):
+    """긴 응대 모드에서 LLM이 채우는 필드. compact 전용 필드는 스키마에 노출하지 않는다."""
 class RecommendationDraft(BaseModel):
     """LLM이 직접 채우는 필드만. id/createdAtMs/isFixedSafetyScript는 서버가 나중에 채운다.
 
@@ -65,6 +69,13 @@ class RecommendationDraft(BaseModel):
     expectedReplies: list[str] = []
     citations: list[CitationDraft]
     needsHumanReview: bool
+
+
+class CompactRecommendationDraft(FullRecommendationDraft):
+    """짧은 안내 모드의 단일 LLM 응답에 추가되는 직원용 요약과 코칭 문장."""
+
+    glanceSummary: str
+    ttsText: str
 
 
 class BusinessProfile(BaseModel):
@@ -108,6 +119,8 @@ class AnalyzeRequest(BaseModel):
     recentTranscript: list[TranscriptTurn]
     recentSituations: list[RiskLevel]
     latestText: str
+    # 기존 클라이언트는 이 필드를 보내지 않으므로 긴 응대 모드가 기본이다.
+    responseMode: ResponseMode = "full"
     storeKnowledge: list[StoreKnowledgeItem] = []
 
 

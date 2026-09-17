@@ -25,6 +25,7 @@ def analyze(body: AnalyzeRequest) -> AnalyzeResponse:
             recent_transcript=body.recentTranscript,
             recent_situations=body.recentSituations,
             latest_text=body.latestText,
+            response_mode=body.responseMode,
             store_knowledge=body.storeKnowledge,
         )
         return AnalyzeResponse(recommendation=recommendation)

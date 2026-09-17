@@ -33,6 +33,8 @@ class Recommendation(BaseModel):
     riskLevel: int
     confidence: float
     sayNow: str
+    glanceSummary: str
+    ttsText: str
     nextActions: list[str]
     doNot: list[str]
     citations: list[Citation]
@@ -50,6 +52,8 @@ class RecommendationDraft(BaseModel):
     riskLevel: int
     confidence: float
     sayNow: str
+    glanceSummary: str
+    ttsText: str
     nextActions: list[str]
     doNot: list[str]
     citations: list[CitationDraft]

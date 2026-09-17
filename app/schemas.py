@@ -93,6 +93,9 @@ class AnalyzeResponse(BaseModel):
 
 class SttResponse(BaseModel):
     text: str
+    # 무음 구간에서 지어낸 문장으로 보여 서버가 걸러낸 경우 True (text는 빈 문자열).
+    # 프론트엔드 동작에는 영향이 없고, 왜 인식 결과가 안 뜨는지 확인할 때 쓴다.
+    filtered: bool = False
 
 
 class ReportRequest(BaseModel):

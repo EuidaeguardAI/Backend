@@ -1,4 +1,4 @@
-"""
+﻿"""
 응대 추천 LangGraph.
 
     START (조건 분기)
@@ -11,6 +11,7 @@
 
 import logging
 import time
+from collections.abc import Iterator
 from typing import TypedDict
 
 from langchain_core.documents import Document
@@ -20,6 +21,7 @@ from langgraph.graph import END, StateGraph
 
 from app.config import CHAT_MODEL, OPENAI_API_KEY
 from app.graph.citations import ground_citations
+from app.http_client import shared_http_client
 from app.rag.retrieve import retrieve_relevant_chunks
 from app.safety.emergency_rules import (
     build_fixed_safety_recommendation,
@@ -33,6 +35,7 @@ from app.schemas import (
     Recommendation,
     ResponseMode,
     SessionIntake,
+    StoreKnowledgeItem,
     TranscriptTurn,
 )
 
@@ -121,7 +124,11 @@ COMPACT_SYSTEM_PROMPT = """당신은 "응대가드 AI"의 응대 보조 엔진�
     유지하세요.
 11. 여러 개를 구매해 그중 일부는 이미 먹거나 쓴 뒤 나머지에서 문제를 제기하는 경우, 전체 수량을
     자동으로 환불 대상에 포함하지 마세요. 실제로 문제가 확인된 수량이 몇 개인지, 이미 먹거나 쓴
-    부분에서도 이상(맛·냄새·몸 상태 등)이 있었는지부터 확인하도록 nextActions에 넣으세요."""
+    부분에서도 이상(맛·냄새·몸 상태 등)이 있었는지부터 확인하도록 nextActions에 넣으세요.
+12. "우리 매장 내규"가 함께 주어지면 그 매장의 실제 운영 기준으로 존중해 반영하되, 반드시
+    "저희 매장 기준으로는", "이 매장 규정상"처럼 법령·공식 고시와 구분되게 말하세요.
+    내규가 법령·공식 고시와 충돌하면 법령이 우선입니다. 그리고 내규는 공식 문서가 아니므로
+    **citations에는 절대 넣지 마세요** — citations는 아래 "근거 문서 후보"에서만 만듭니다."""
 
 PROBLEM_TYPE_LABEL = {
     "refund_exchange": "환불·교환",
@@ -151,6 +158,7 @@ class GraphState(TypedDict):
     recent_situations: list[str]
     latest_text: str
     response_mode: ResponseMode
+    store_knowledge: list[StoreKnowledgeItem]
     retrieved: list[Document]
     recommendation: Recommendation | None
 
@@ -329,6 +337,25 @@ def _format_knowledge(index: int, doc: Document) -> str:
     )
 
 
+KNOWLEDGE_CATEGORY_LABEL = {
+    "refund_policy": "환불·교환 기준",
+    "product": "취급 상품",
+    "frequent_claim": "자주 오는 클레임",
+    "etc": "기타",
+}
+
+
+def _format_store_knowledge(items: list[StoreKnowledgeItem]) -> str:
+    """직원이 등록한 매장 규정을 프롬프트 한 블록으로 만든다. 없으면 빈 문자열."""
+    lines = []
+    for item in items:
+        label = KNOWLEDGE_CATEGORY_LABEL.get(item.category, item.category)
+        title = item.title.strip()
+        header = f"[{label}] {title}" if title else f"[{label}]"
+        lines.append(f"{header}\n  {item.body.strip()}")
+    return "\n".join(lines)
+
+
 def _build_user_prompt(state: GraphState) -> str:
     intake = state["intake"]
     context_lines = [f"업종: {state['profile'].industry}"]
@@ -368,6 +395,15 @@ def _build_user_prompt(state: GraphState) -> str:
             "## 자동 감지된 위험 표현 (참고 신호, 오탐 가능)",
             detected,
         ]
+    # 직원이 앱에 직접 등록한 매장 규정. 공식 문서가 아니므로 "근거 문서 후보"와 섞지 않고
+    # 별도 블록으로 둔다(규칙 12에서 citations 금지를 명시한다).
+    store_rules = _format_store_knowledge(state.get("store_knowledge") or [])
+    if store_rules:
+        sections += [
+            "",
+            "## 우리 매장 내규 (직원이 직접 등록 · 법령 아님 · citations 금지)",
+            store_rules,
+        ]
     sections += [
         "",
         "## 근거 문서 후보 (이 안에서만 인용하세요)",
@@ -387,6 +423,19 @@ def generate_node(state: GraphState) -> dict:
     )
     system_prompt = (
         COMPACT_SYSTEM_PROMPT if response_mode == "compact" else FULL_SYSTEM_PROMPT
+    llm = ChatOpenAI(
+        model=CHAT_MODEL,
+        api_key=OPENAI_API_KEY,
+        temperature=0.2,
+        http_client=shared_http_client,
+    )
+    structured_llm = llm.with_structured_output(RecommendationDraft)
+
+    draft: RecommendationDraft = structured_llm.invoke(
+        [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=_build_user_prompt(state)),
+        ]
     )
     structured_llm = llm.with_structured_output(draft_model)
 
@@ -433,6 +482,26 @@ def _build_graph():
 recommendation_graph = _build_graph()
 
 
+def _initial_state(
+    profile: BusinessProfile,
+    intake: SessionIntake,
+    recent_transcript: list[TranscriptTurn],
+    recent_situations: list[str],
+    latest_text: str,
+    store_knowledge: list[StoreKnowledgeItem] | None,
+) -> GraphState:
+    return {
+        "profile": profile,
+        "intake": intake,
+        "recent_transcript": recent_transcript,
+        "recent_situations": recent_situations,
+        "latest_text": latest_text,
+        "store_knowledge": store_knowledge or [],
+        "retrieved": [],
+        "recommendation": None,
+    }
+
+
 def run_recommendation_graph(
     profile: BusinessProfile,
     intake: SessionIntake,
@@ -460,4 +529,106 @@ def run_recommendation_graph(
             "RAG timing route=recommendation stage=total elapsed_ms=%.1f",
             (time.perf_counter() - started_at) * 1000,
         )
+    store_knowledge: list[StoreKnowledgeItem] | None = None,
+) -> Recommendation:
+    result = recommendation_graph.invoke(
+        _initial_state(
+            profile,
+            intake,
+            recent_transcript,
+            recent_situations,
+            latest_text,
+            store_knowledge,
+        )
+    )
     return result["recommendation"]
+
+
+def stream_recommendation(
+    profile: BusinessProfile,
+    intake: SessionIntake,
+    recent_transcript: list[TranscriptTurn],
+    recent_situations: list[str],
+    latest_text: str,
+    store_knowledge: list[StoreKnowledgeItem] | None = None,
+) -> Iterator[dict]:
+    """추천 답변을 만드는 과정을 중간 결과째로 흘려보낸다.
+
+    왜 그래프(invoke)를 쓰지 않는가: LangGraph는 노드 하나가 끝나야 결과를 준다. 그런데
+    지연의 대부분은 generate 노드 **안에서** JSON이 다 써지기를 기다리는 시간이다. 전체
+    JSON(근거·다음 행동·예상 답변까지)이 완성되기를 기다리면 3~5초가 그냥 흐른다. 직원이
+    실제로 필요한 것은 그중 첫 문장(sayNow) 하나다. 그래서 여기서는 같은 노드 함수를 순서대로
+    부르되 generate만 스트리밍으로 바꾼다 — 분기·검색·인용 검증 로직은 그래프와 공유한다.
+
+    yield 하는 dict:
+      {"type": "stage",   "stage": "retrieving" | "generating"}
+      {"type": "partial", "situation": ..., "sayNow": "여기까지 도착한 문장"}
+      {"type": "done",    "recommendation": Recommendation}
+    """
+    state = _initial_state(
+        profile, intake, recent_transcript, recent_situations, latest_text, store_knowledge
+    )
+
+    # 위협·흉기·반복 폭언은 생성형을 거치지 않는다. 기다릴 것이 없으므로 바로 완성본을 준다.
+    if route_after_entry(state) == "fixed_safety":
+        yield {"type": "done", "recommendation": fixed_safety_node(state)["recommendation"]}
+        return
+
+    yield {"type": "stage", "stage": "retrieving"}
+    state.update(retrieve_node(state))
+
+    yield {"type": "stage", "stage": "generating"}
+
+    llm = ChatOpenAI(
+        model=CHAT_MODEL,
+        api_key=OPENAI_API_KEY,
+        temperature=0.2,
+        http_client=shared_http_client,
+    )
+    # 여기서만 pydantic 클래스 대신 JSON 스키마(dict)를 넘긴다. pydantic 클래스를 주면
+    # LangChain이 전체 응답을 모아 한 번에 검증하므로 스트리밍을 걸어도 마지막에 완성본
+    # 하나만 나온다. dict 스키마를 주면 부분 JSON을 관대하게 파싱해 자라나는 dict를 준다.
+    structured_llm = llm.with_structured_output(RecommendationDraft.model_json_schema())
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=_build_user_prompt(state)),
+    ]
+
+    # 스트리밍 중에는 부분 dict가 온다(아직 스키마를 만족하지 않으므로 pydantic 객체가 아니다).
+    # 마지막 조각만이 완성된 draft다.
+    last_chunk = None
+    last_sent = ""
+    for chunk in structured_llm.stream(messages):
+        last_chunk = chunk
+        partial = chunk if isinstance(chunk, dict) else chunk.model_dump()
+        say_now = (partial.get("sayNow") or "").strip()
+        # 같은 문장을 다시 보내지 않는다. 필드가 아직 비어 있는 동안에는 보낼 것이 없다.
+        if not say_now or say_now == last_sent:
+            continue
+        last_sent = say_now
+        yield {
+            "type": "partial",
+            # situation이 아직 안 왔으면 화면 색이 튀지 않게 중립값으로 둔다.
+            "situation": partial.get("situation") or "normal",
+            "sayNow": say_now,
+        }
+
+    if last_chunk is None:
+        raise RuntimeError("모델이 아무 응답도 보내지 않았습니다.")
+
+    draft = (
+        last_chunk
+        if isinstance(last_chunk, RecommendationDraft)
+        else RecommendationDraft.model_validate(last_chunk)
+    )
+
+    recommendation = Recommendation(
+        **draft.model_dump(exclude={"citations"}),
+        # 인용 검증은 반드시 전체 JSON이 모인 뒤에 한다. 도중에 끊긴 문장으로 원문을 대조하면
+        # 멀쩡한 근거도 전부 탈락한다.
+        citations=ground_citations(draft.citations, state["retrieved"]),
+        id=_next_id(),
+        createdAtMs=_now_ms(),
+        isFixedSafetyScript=False,
+    )
+    yield {"type": "done", "recommendation": recommendation}

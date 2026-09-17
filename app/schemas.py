@@ -44,17 +44,23 @@ class Recommendation(BaseModel):
 
 
 class RecommendationDraft(BaseModel):
-    """LLM이 직접 채우는 필드만. id/createdAtMs/isFixedSafetyScript는 서버가 나중에 채운다."""
+    """LLM이 직접 채우는 필드만. id/createdAtMs/isFixedSafetyScript는 서버가 나중에 채운다.
+
+    필드 순서가 곧 모델이 JSON을 써 내려가는 순서다. 스트리밍(/analyze/stream)에서 직원이
+    가장 먼저 봐야 하는 것은 "지금 뭐라고 말할지"(sayNow)이므로 그것을 앞쪽에 둔다.
+    근거(citations)는 가장 길고 화면에서는 접혀 있으므로 맨 뒤로 보낸다 — 순서를 바꾸면
+    첫 문장이 뜨는 시점이 그만큼 늦어진다.
+    """
 
     situation: RiskLevel
     riskLevel: int
-    confidence: float
     sayNow: str
+    confidence: float
     nextActions: list[str]
     doNot: list[str]
+    expectedReplies: list[str] = []
     citations: list[CitationDraft]
     needsHumanReview: bool
-    expectedReplies: list[str] = []
 
 
 class BusinessProfile(BaseModel):
@@ -79,12 +85,26 @@ class TranscriptTurn(BaseModel):
     text: str
 
 
+class StoreKnowledgeItem(BaseModel):
+    """직원이 앱에 직접 등록한 매장 규정 한 건.
+
+    프론트엔드의 localStorage에만 있는 데이터로, 요청마다 실려 온다. 서버는 이것을
+    저장하지 않고 프롬프트에만 쓴다(사용자 기기 밖으로 나가지 않는다는 화면의 안내와
+    어긋나지 않게 하려는 것이다).
+    """
+
+    category: str
+    title: str
+    body: str
+
+
 class AnalyzeRequest(BaseModel):
     profile: BusinessProfile
     intake: SessionIntake
     recentTranscript: list[TranscriptTurn]
     recentSituations: list[RiskLevel]
     latestText: str
+    storeKnowledge: list[StoreKnowledgeItem] = []
 
 
 class AnalyzeResponse(BaseModel):

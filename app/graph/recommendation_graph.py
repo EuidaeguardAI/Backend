@@ -9,6 +9,7 @@
 그대로 그래프로 옮긴 것이다.
 """
 
+import logging
 import time
 from typing import TypedDict
 
@@ -34,6 +35,8 @@ from app.schemas import (
     SessionIntake,
     TranscriptTurn,
 )
+
+logger = logging.getLogger(__name__)
 
 FULL_SYSTEM_PROMPT = """당신은 "응대가드 AI"의 응대 보조 엔진입니다. 고객응대근로자(편의점·서비스업 종사자)가 폭언·환불 분쟁·위협 상황에서
 안전하게 대응하도록 돕습니다. 다음 원칙을 반드시 지키세요.
@@ -285,12 +288,18 @@ def _pinned_sections(state: GraphState) -> tuple[str, ...]:
 
 
 def retrieve_node(state: GraphState) -> dict:
+    started_at = time.perf_counter()
     # 지식베이스가 52 → 553 청크로 늘어나 top_k=3으로는 관련 조문이 밀려난다.
     docs = retrieve_relevant_chunks(
         state["latest_text"],
         top_k=5,
         pinned_sections=_pinned_sections(state),
         industry_id=state["profile"].industryId,
+    )
+    logger.info(
+        "RAG timing route=recommendation stage=retrieval elapsed_ms=%.1f documents=%d",
+        (time.perf_counter() - started_at) * 1000,
+        len(docs),
     )
     return {"retrieved": docs}
 
@@ -370,6 +379,7 @@ def _build_user_prompt(state: GraphState) -> str:
 
 
 def generate_node(state: GraphState) -> dict:
+    started_at = time.perf_counter()
     llm = ChatOpenAI(model=CHAT_MODEL, api_key=OPENAI_API_KEY, temperature=0.2)
     response_mode = state["response_mode"]
     draft_model = (
@@ -380,12 +390,18 @@ def generate_node(state: GraphState) -> dict:
     )
     structured_llm = llm.with_structured_output(draft_model)
 
-    draft: FullRecommendationDraft | CompactRecommendationDraft = structured_llm.invoke(
-        [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=_build_user_prompt(state)),
-        ]
-    )
+    try:
+        draft: FullRecommendationDraft | CompactRecommendationDraft = structured_llm.invoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=_build_user_prompt(state)),
+            ]
+        )
+    finally:
+        logger.info(
+            "RAG timing route=recommendation stage=llm elapsed_ms=%.1f",
+            (time.perf_counter() - started_at) * 1000,
+        )
 
     recommendation = Recommendation(
         **draft.model_dump(exclude={"citations"}),
@@ -425,16 +441,23 @@ def run_recommendation_graph(
     latest_text: str,
     response_mode: ResponseMode = "full",
 ) -> Recommendation:
-    result = recommendation_graph.invoke(
-        {
-            "profile": profile,
-            "intake": intake,
-            "recent_transcript": recent_transcript,
-            "recent_situations": recent_situations,
-            "latest_text": latest_text,
-            "response_mode": response_mode,
-            "retrieved": [],
-            "recommendation": None,
-        }
-    )
+    started_at = time.perf_counter()
+    try:
+        result = recommendation_graph.invoke(
+            {
+                "profile": profile,
+                "intake": intake,
+                "recent_transcript": recent_transcript,
+                "recent_situations": recent_situations,
+                "latest_text": latest_text,
+                "response_mode": response_mode,
+                "retrieved": [],
+                "recommendation": None,
+            }
+        )
+    finally:
+        logger.info(
+            "RAG timing route=recommendation stage=total elapsed_ms=%.1f",
+            (time.perf_counter() - started_at) * 1000,
+        )
     return result["recommendation"]

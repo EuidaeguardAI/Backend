@@ -11,6 +11,7 @@ analyze는 "녹음된 손님 발화"를 받아 손님에게 읽어줄 문장을 
 문장(sayNow)이 분리돼 있다. 녹음을 켜고 설문을 채울 여유가 없을 때 쓰는 빠른 경로다.
 """
 
+import logging
 import time
 from typing import Optional, TypedDict
 
@@ -35,6 +36,8 @@ from app.safety.emergency_rules import (
     should_trigger_fixed_safety,
 )
 from app.schemas import AskAnswer, AskAnswerDraft, AskMessage, BusinessProfile
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """당신은 "응대가드 AI"의 응대 상담 챗봇입니다. 고객응대근로자(편의점·서비스업 종사자)가
 응대 도중 또는 응대 직후에 "이럴 땐 어떻게 해야 하나요?"라고 물으면, 바로 실행할 수 있는 형태로 답합니다.
@@ -170,12 +173,18 @@ def _pinned_sections(state: AskState) -> tuple[str, ...]:
 
 
 def retrieve_node(state: AskState) -> dict:
+    started_at = time.perf_counter()
     profile = state["profile"]
     docs = retrieve_relevant_chunks(
         _retrieval_query(state),
         top_k=5,
         pinned_sections=_pinned_sections(state),
         industry_id=profile.industryId if profile else None,
+    )
+    logger.info(
+        "RAG timing route=ask stage=retrieval elapsed_ms=%.1f documents=%d",
+        (time.perf_counter() - started_at) * 1000,
+        len(docs),
     )
     return {"retrieved": docs}
 
@@ -221,16 +230,23 @@ def _history_messages(history: list[AskMessage]) -> list:
 
 
 def generate_node(state: AskState) -> dict:
+    started_at = time.perf_counter()
     llm = ChatOpenAI(model=CHAT_MODEL, api_key=OPENAI_API_KEY, temperature=0.2)
     structured_llm = llm.with_structured_output(AskAnswerDraft)
 
-    draft: AskAnswerDraft = structured_llm.invoke(
-        [
-            SystemMessage(content=SYSTEM_PROMPT),
-            *_history_messages(state["history"]),
-            HumanMessage(content=_build_user_prompt(state)),
-        ]
-    )
+    try:
+        draft: AskAnswerDraft = structured_llm.invoke(
+            [
+                SystemMessage(content=SYSTEM_PROMPT),
+                *_history_messages(state["history"]),
+                HumanMessage(content=_build_user_prompt(state)),
+            ]
+        )
+    finally:
+        logger.info(
+            "RAG timing route=ask stage=llm elapsed_ms=%.1f",
+            (time.perf_counter() - started_at) * 1000,
+        )
 
     answer = AskAnswer(
         **draft.model_dump(exclude={"citations"}),
@@ -265,13 +281,20 @@ def run_ask_graph(
     history: list[AskMessage],
     question: str,
 ) -> AskAnswer:
-    result = ask_graph.invoke(
-        {
-            "profile": profile,
-            "history": history,
-            "question": question,
-            "retrieved": [],
-            "answer": None,
-        }
-    )
+    started_at = time.perf_counter()
+    try:
+        result = ask_graph.invoke(
+            {
+                "profile": profile,
+                "history": history,
+                "question": question,
+                "retrieved": [],
+                "answer": None,
+            }
+        )
+    finally:
+        logger.info(
+            "RAG timing route=ask stage=total elapsed_ms=%.1f",
+            (time.perf_counter() - started_at) * 1000,
+        )
     return result["answer"]

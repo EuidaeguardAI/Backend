@@ -5,13 +5,16 @@ from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_openai import OpenAIEmbeddings
 
 from app.config import EMBEDDING_MODEL, VECTOR_STORE_PATH
+from app.http_client import shared_http_client
 
 
 @lru_cache(maxsize=1)
 def get_vector_store() -> InMemoryVectorStore | None:
     if not VECTOR_STORE_PATH.exists():
         return None
-    embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
+    # 연결을 오래 살려 두는 공용 클라이언트를 쓴다. 손님 사이의 공백 뒤 첫 검색이
+    # 매번 TLS 핸드셰이크부터 다시 하는 것을 막는다(app/http_client.py).
+    embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, http_client=shared_http_client)
     return InMemoryVectorStore.load(str(VECTOR_STORE_PATH), embeddings)
 
 

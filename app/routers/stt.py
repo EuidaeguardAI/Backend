@@ -2,12 +2,15 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from openai import OpenAI
 
 from app.config import OPENAI_API_KEY, TRANSCRIBE_MODEL
+from app.http_client import shared_http_client
 from app.schemas import SttResponse
 from app.stt_filters import filter_transcript
 from app.stt_hints import STT_PROMPT
 
 router = APIRouter()
-_client = OpenAI(api_key=OPENAI_API_KEY)
+# 연결을 오래 살려 두는 공용 클라이언트를 쓴다. 상시 녹음에서는 손님 사이의 공백이 길어
+# 매번 연결을 새로 맺게 되는데, 그 핸드셰이크가 발화마다 1초 가까이 붙는다(app/http_client.py).
+_client = OpenAI(api_key=OPENAI_API_KEY, http_client=shared_http_client)
 
 # whisper-1은 구간마다 "여기엔 말이 없었을 확률"(no_speech_prob)을 같이 준다.
 # 이 값이 높고 인식 신뢰도(avg_logprob)가 낮으면 무음에 대고 지어낸 문장으로 본다.

@@ -1,4 +1,4 @@
-"""
+﻿"""
 '물어보기' 탭(챗봇)의 질의응답 그래프.
 
     START (조건 분기)
@@ -27,6 +27,7 @@ from app.graph.recommendation_graph import (
     _format_knowledge,
 )
 from app.graph.citations import ground_citations
+from app.http_client import shared_http_client
 from app.rag.retrieve import retrieve_relevant_chunks
 from app.safety.emergency_rules import (
     build_fixed_safety_recommendation,
@@ -221,7 +222,12 @@ def _history_messages(history: list[AskMessage]) -> list:
 
 
 def generate_node(state: AskState) -> dict:
-    llm = ChatOpenAI(model=CHAT_MODEL, api_key=OPENAI_API_KEY, temperature=0.2)
+    llm = ChatOpenAI(
+        model=CHAT_MODEL,
+        api_key=OPENAI_API_KEY,
+        temperature=0.2,
+        http_client=shared_http_client,
+    )
     structured_llm = llm.with_structured_output(AskAnswerDraft)
 
     draft: AskAnswerDraft = structured_llm.invoke(

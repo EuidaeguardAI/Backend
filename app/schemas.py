@@ -48,9 +48,9 @@ class Recommendation(BaseModel):
 
 
 class FullRecommendationDraft(BaseModel):
-    """긴 응대 모드에서 LLM이 채우는 필드. compact 전용 필드는 스키마에 노출하지 않는다."""
-class RecommendationDraft(BaseModel):
-    """LLM이 직접 채우는 필드만. id/createdAtMs/isFixedSafetyScript는 서버가 나중에 채운다.
+    """긴 응대 모드에서 LLM이 채우는 필드. compact 전용 필드는 스키마에 노출하지 않는다.
+
+    id/createdAtMs/isFixedSafetyScript는 서버가 나중에 채운다.
 
     필드 순서가 곧 모델이 JSON을 써 내려가는 순서다. 스트리밍(/analyze/stream)에서 직원이
     가장 먼저 봐야 하는 것은 "지금 뭐라고 말할지"(sayNow)이므로 그것을 앞쪽에 둔다.
@@ -62,8 +62,6 @@ class RecommendationDraft(BaseModel):
     riskLevel: int
     sayNow: str
     confidence: float
-    glanceSummary: str
-    ttsText: str
     nextActions: list[str]
     doNot: list[str]
     expectedReplies: list[str] = []

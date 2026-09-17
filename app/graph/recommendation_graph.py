@@ -416,26 +416,19 @@ def _build_user_prompt(state: GraphState) -> str:
 
 def generate_node(state: GraphState) -> dict:
     started_at = time.perf_counter()
-    llm = ChatOpenAI(model=CHAT_MODEL, api_key=OPENAI_API_KEY, temperature=0.2)
     response_mode = state["response_mode"]
     draft_model = (
         CompactRecommendationDraft if response_mode == "compact" else FullRecommendationDraft
     )
     system_prompt = (
         COMPACT_SYSTEM_PROMPT if response_mode == "compact" else FULL_SYSTEM_PROMPT
+    )
+    # 연결을 오래 살려 두는 공용 클라이언트를 쓴다(app/http_client.py).
     llm = ChatOpenAI(
         model=CHAT_MODEL,
         api_key=OPENAI_API_KEY,
         temperature=0.2,
         http_client=shared_http_client,
-    )
-    structured_llm = llm.with_structured_output(RecommendationDraft)
-
-    draft: RecommendationDraft = structured_llm.invoke(
-        [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=_build_user_prompt(state)),
-        ]
     )
     structured_llm = llm.with_structured_output(draft_model)
 
@@ -489,6 +482,7 @@ def _initial_state(
     recent_situations: list[str],
     latest_text: str,
     store_knowledge: list[StoreKnowledgeItem] | None,
+    response_mode: ResponseMode,
 ) -> GraphState:
     return {
         "profile": profile,
@@ -497,6 +491,7 @@ def _initial_state(
         "recent_situations": recent_situations,
         "latest_text": latest_text,
         "store_knowledge": store_knowledge or [],
+        "response_mode": response_mode,
         "retrieved": [],
         "recommendation": None,
     }
@@ -508,39 +503,27 @@ def run_recommendation_graph(
     recent_transcript: list[TranscriptTurn],
     recent_situations: list[str],
     latest_text: str,
+    store_knowledge: list[StoreKnowledgeItem] | None = None,
     response_mode: ResponseMode = "full",
 ) -> Recommendation:
     started_at = time.perf_counter()
     try:
         result = recommendation_graph.invoke(
-            {
-                "profile": profile,
-                "intake": intake,
-                "recent_transcript": recent_transcript,
-                "recent_situations": recent_situations,
-                "latest_text": latest_text,
-                "response_mode": response_mode,
-                "retrieved": [],
-                "recommendation": None,
-            }
+            _initial_state(
+                profile,
+                intake,
+                recent_transcript,
+                recent_situations,
+                latest_text,
+                store_knowledge,
+                response_mode,
+            )
         )
     finally:
         logger.info(
             "RAG timing route=recommendation stage=total elapsed_ms=%.1f",
             (time.perf_counter() - started_at) * 1000,
         )
-    store_knowledge: list[StoreKnowledgeItem] | None = None,
-) -> Recommendation:
-    result = recommendation_graph.invoke(
-        _initial_state(
-            profile,
-            intake,
-            recent_transcript,
-            recent_situations,
-            latest_text,
-            store_knowledge,
-        )
-    )
     return result["recommendation"]
 
 
@@ -551,6 +534,7 @@ def stream_recommendation(
     recent_situations: list[str],
     latest_text: str,
     store_knowledge: list[StoreKnowledgeItem] | None = None,
+    response_mode: ResponseMode = "full",
 ) -> Iterator[dict]:
     """추천 답변을 만드는 과정을 중간 결과째로 흘려보낸다.
 
@@ -566,7 +550,13 @@ def stream_recommendation(
       {"type": "done",    "recommendation": Recommendation}
     """
     state = _initial_state(
-        profile, intake, recent_transcript, recent_situations, latest_text, store_knowledge
+        profile,
+        intake,
+        recent_transcript,
+        recent_situations,
+        latest_text,
+        store_knowledge,
+        response_mode,
     )
 
     # 위협·흉기·반복 폭언은 생성형을 거치지 않는다. 기다릴 것이 없으므로 바로 완성본을 준다.
@@ -579,6 +569,12 @@ def stream_recommendation(
 
     yield {"type": "stage", "stage": "generating"}
 
+    draft_model = (
+        CompactRecommendationDraft if response_mode == "compact" else FullRecommendationDraft
+    )
+    system_prompt = (
+        COMPACT_SYSTEM_PROMPT if response_mode == "compact" else FULL_SYSTEM_PROMPT
+    )
     llm = ChatOpenAI(
         model=CHAT_MODEL,
         api_key=OPENAI_API_KEY,
@@ -588,9 +584,9 @@ def stream_recommendation(
     # 여기서만 pydantic 클래스 대신 JSON 스키마(dict)를 넘긴다. pydantic 클래스를 주면
     # LangChain이 전체 응답을 모아 한 번에 검증하므로 스트리밍을 걸어도 마지막에 완성본
     # 하나만 나온다. dict 스키마를 주면 부분 JSON을 관대하게 파싱해 자라나는 dict를 준다.
-    structured_llm = llm.with_structured_output(RecommendationDraft.model_json_schema())
+    structured_llm = llm.with_structured_output(draft_model.model_json_schema())
     messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=_build_user_prompt(state)),
     ]
 
@@ -618,8 +614,8 @@ def stream_recommendation(
 
     draft = (
         last_chunk
-        if isinstance(last_chunk, RecommendationDraft)
-        else RecommendationDraft.model_validate(last_chunk)
+        if isinstance(last_chunk, draft_model)
+        else draft_model.model_validate(last_chunk)
     )
 
     recommendation = Recommendation(
@@ -630,5 +626,6 @@ def stream_recommendation(
         id=_next_id(),
         createdAtMs=_now_ms(),
         isFixedSafetyScript=False,
+        responseMode=response_mode,
     )
     yield {"type": "done", "recommendation": recommendation}

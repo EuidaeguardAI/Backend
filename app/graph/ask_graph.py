@@ -231,6 +231,7 @@ def _history_messages(history: list[AskMessage]) -> list:
 
 
 def generate_node(state: AskState) -> dict:
+    started_at = time.perf_counter()
     llm = ChatOpenAI(
         model=CHAT_MODEL,
         api_key=OPENAI_API_KEY,

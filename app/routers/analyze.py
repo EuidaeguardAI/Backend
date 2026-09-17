@@ -64,6 +64,7 @@ async def analyze_stream(body: AnalyzeRequest) -> StreamingResponse:
             recent_situations=body.recentSituations,
             latest_text=body.latestText,
             store_knowledge=body.storeKnowledge,
+            response_mode=body.responseMode,
         )
         done = object()
 

@@ -18,6 +18,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
 from app.config import CHAT_MODEL, OPENAI_API_KEY
+from app.graph.citations import ground_citations
 from app.rag.retrieve import retrieve_relevant_chunks
 from app.safety.emergency_rules import (
     build_fixed_safety_recommendation,
@@ -43,6 +44,9 @@ SYSTEM_PROMPT = """당신은 "응대가드 AI"의 응대 보조 엔진입니다.
    (예: "별표Ⅱ 2. 식료품(19개 업종)", "3. 용어의 정의 (p.4)")를 그대로 옮기세요. 위치를 임의로 지어내지 마세요.
 2-2. 근거 문서에는 공식 고시·법령과 사내 실무 매뉴얼이 섞여 있습니다. 사내 매뉴얼의 내용을 법령상 의무인 것처럼
    말하지 말고, "점포 기준으로는", "매장 절차상"처럼 구분해서 안내하세요.
+2-3. citations의 quote에는 그 답변의 근거가 된 문장을 근거 문서 본문에서 **한 글자도 바꾸지 말고**
+   그대로 1~2문장 옮기세요. 요약하거나 말을 다듬으면 서버가 원문 대조에 실패해 근거 표시가 사라집니다.
+   본문에 그대로 옮길 만한 문장이 없는 문서는 아예 인용하지 마세요.
 3. sayNow는 1~2문장, 정중하고 짧게. 고객을 자극하는 표현은 doNot에 포함하세요.
 4. 대화에 위협·협박·반복 폭언이 있으면 situation을 threat 또는 emergency로, riskLevel을 높게 설정하세요.
 5. 확신이 낮거나(소음, 불명확한 발화 등) 정보가 부족하면 confidence를 낮추고 needsHumanReview를 true로 하세요.
@@ -222,7 +226,7 @@ def _pinned_sections(state: GraphState) -> tuple[str, ...]:
 
 
 def retrieve_node(state: GraphState) -> dict:
-    # 지식베이스가 52 → 714 청크로 늘어나 top_k=3으로는 관련 조문이 밀려난다.
+    # 지식베이스가 52 → 553 청크로 늘어나 top_k=3으로는 관련 조문이 밀려난다.
     docs = retrieve_relevant_chunks(
         state["latest_text"],
         top_k=5,
@@ -252,6 +256,7 @@ def _format_knowledge(index: int, doc: Document) -> str:
         f"[근거 {index + 1}] {meta.get('documentTitle')}\n"
         f"  위치: {where}\n"
         f"  종류: {kind}\n"
+        f"  본문(quote는 이 안에서 그대로 옮길 것):\n"
         f"{doc.page_content}"
     )
 
@@ -317,7 +322,10 @@ def generate_node(state: GraphState) -> dict:
     )
 
     recommendation = Recommendation(
-        **draft.model_dump(),
+        **draft.model_dump(exclude={"citations"}),
+        # LLM이 적어낸 인용을 그대로 내보내지 않는다. 검색된 청크에 실제로 있는 문장만
+        # 근거로 남기고 출처 표기도 메타데이터로 교정한다(graph/citations.py).
+        citations=ground_citations(draft.citations, state["retrieved"]),
         id=_next_id(),
         createdAtMs=_now_ms(),
         isFixedSafetyScript=False,

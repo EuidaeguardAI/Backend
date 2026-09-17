@@ -26,6 +26,7 @@ from app.graph.recommendation_graph import (
     PROBLEM_TYPE_HINTS,
     _format_knowledge,
 )
+from app.graph.citations import ground_citations
 from app.rag.retrieve import retrieve_relevant_chunks
 from app.safety.emergency_rules import (
     build_fixed_safety_recommendation,
@@ -47,6 +48,9 @@ SYSTEM_PROMPT = """당신은 "응대가드 AI"의 응대 상담 챗봇입니다.
    (예: "별표Ⅱ 2. 식료품(19개 업종)", "3. 용어의 정의 (p.4)")를 그대로 옮기세요. 위치를 임의로 지어내지 마세요.
 2-2. 근거 문서에는 공식 고시·법령과 사내 실무 매뉴얼이 섞여 있습니다. 사내 매뉴얼의 내용을 법령상 의무인 것처럼
    말하지 말고, "점포 기준으로는", "매장 절차상"처럼 구분해서 안내하세요.
+2-3. citations의 quote에는 그 답변의 근거가 된 문장을 근거 문서 본문에서 **한 글자도 바꾸지 말고**
+   그대로 1~2문장 옮기세요. 요약하거나 말을 다듬으면 서버가 원문 대조에 실패해 근거 표시가 사라집니다.
+   본문에 그대로 옮길 만한 문장이 없는 문서는 아예 인용하지 마세요.
 3. answer는 질문에 대한 설명입니다. 2~4문장으로 짧게, 결론부터 쓰세요. 인사말·사과·서론을 붙이지 마세요.
 4. sayNow는 손님에게 그대로 소리 내어 읽을 수 있는 1~2문장입니다. 손님에게 할 말이 필요한 질문일 때만 채우고,
    절차나 규정만 묻는 질문이면 비워 두세요(null).
@@ -229,7 +233,9 @@ def generate_node(state: AskState) -> dict:
     )
 
     answer = AskAnswer(
-        **draft.model_dump(),
+        **draft.model_dump(exclude={"citations"}),
+        # analyze와 같은 검증을 거친다. 지어낸 문장을 근거라며 강조해 보여주지 않기 위해서다.
+        citations=ground_citations(draft.citations, state["retrieved"]),
         id=_next_id(),
         createdAtMs=_now_ms(),
         isFixedSafetyScript=False,

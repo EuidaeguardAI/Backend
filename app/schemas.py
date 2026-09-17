@@ -11,9 +11,20 @@ RiskLevel = Literal["normal", "dispute", "abuse", "threat", "emergency"]
 Speaker = Literal["customer", "staff", "ai"]
 
 
-class Citation(BaseModel):
+class CitationDraft(BaseModel):
+    """LLM이 직접 적어내는 인용. sourceType은 서버가 검색 결과에서 채운다."""
+
     label: str
     section: Optional[str] = None
+    # 답변의 근거가 된 문장을 근거 문서 본문에서 그대로 옮긴 것.
+    # 검색된 청크 안에 실제로 있는 문장인지 서버가 확인한 뒤에만 살아남는다(graph/citations.py).
+    quote: Optional[str] = None
+
+
+class Citation(CitationDraft):
+    # 색인 당시의 분류(manual | law | standard | notice | guide). 화면에서 사내 매뉴얼과
+    # 공식 고시를 구분해 표시하는 데 쓴다.
+    sourceType: Optional[str] = None
 
 
 class Recommendation(BaseModel):
@@ -41,7 +52,7 @@ class RecommendationDraft(BaseModel):
     sayNow: str
     nextActions: list[str]
     doNot: list[str]
-    citations: list[Citation]
+    citations: list[CitationDraft]
     needsHumanReview: bool
     expectedReplies: list[str] = []
 
@@ -114,7 +125,7 @@ class AskAnswerDraft(BaseModel):
     sayNow: Optional[str] = None
     nextActions: list[str]
     doNot: list[str]
-    citations: list[Citation]
+    citations: list[CitationDraft]
     needsHumanReview: bool
 
 

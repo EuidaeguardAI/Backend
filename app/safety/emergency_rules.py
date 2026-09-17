@@ -85,6 +85,13 @@ def build_fixed_safety_recommendation(latest_text: str = "") -> RecommendationDr
         sayNow="지금은 대응하지 않고 거리를 확보하겠습니다.",
         nextActions=next_actions,
         doNot=do_not,
-        citations=[Citation(label="산업안전보건법 제41조", section="건강장해 예방조치")],
+        citations=[
+            # 검색을 거치지 않는 고정 절차라 sourceType을 직접 붙인다(화면 배지 표시용).
+            Citation(
+                label="산업안전보건법 제41조",
+                section="건강장해 예방조치",
+                sourceType="law",
+            )
+        ],
         needsHumanReview=True,
     )

@@ -14,7 +14,7 @@ from app.safety.abusive_lexicon import (
     match_threat,
     match_weapon,
 )
-from app.schemas import Citation, RecommendationDraft, RiskLevel
+from app.schemas import Citation, CompactRecommendationDraft, RiskLevel
 
 # 하위 호환용 별칭. 실제 매칭은 abusive_lexicon의 정규화 매칭을 쓴다.
 THREAT_KEYWORDS = THREAT + WEAPON
@@ -54,7 +54,7 @@ def describe_detected_risk(text: str) -> str:
     return " / ".join(parts)
 
 
-def build_fixed_safety_recommendation(latest_text: str = "") -> RecommendationDraft:
+def build_fixed_safety_recommendation(latest_text: str = "") -> CompactRecommendationDraft:
     """고정 안전 절차. 흉기·강한 위협이 감지되면 112 신고를 첫 조치로 올린다."""
     weapon_detected = contains_weapon_keyword(latest_text)
     severe = weapon_detected or bool(match_severe_profanity(latest_text))
@@ -78,7 +78,7 @@ def build_fixed_safety_recommendation(latest_text: str = "") -> RecommendationDr
     if severe:
         do_not.append("등을 보이거나 좁은 공간으로 이동하지 않기")
 
-    return RecommendationDraft(
+    return CompactRecommendationDraft(
         situation="emergency",
         riskLevel=5,
         confidence=0.95,

@@ -27,13 +27,54 @@ from app.safety.emergency_rules import (
 )
 from app.schemas import (
     BusinessProfile,
+    CompactRecommendationDraft,
+    FullRecommendationDraft,
     Recommendation,
-    RecommendationDraft,
+    ResponseMode,
     SessionIntake,
     TranscriptTurn,
 )
 
-SYSTEM_PROMPT = """당신은 "응대가드 AI"의 응대 보조 엔진입니다. 고객응대근로자(편의점·서비스업 종사자)가 폭언·환불 분쟁·위협 상황에서
+FULL_SYSTEM_PROMPT = """당신은 "응대가드 AI"의 응대 보조 엔진입니다. 고객응대근로자(편의점·서비스업 종사자)가 폭언·환불 분쟁·위협 상황에서
+안전하게 대응하도록 돕습니다. 다음 원칙을 반드시 지키세요.
+
+1. 당신은 법률 판단 기관이 아닙니다. "범죄가 성립한다", "고소 가능하다" 같은 확정적 법률 판단을 하지 마세요.
+   대신 "해당 가능성이 있어 관리자·전문가 확인이 필요합니다"처럼 운영 안내 톤을 사용하세요.
+2. 답변은 반드시 제공된 근거 문서(citations 후보) 안에서만 만드세요. 근거로 삼을 만한 내용이 없으면
+   citations를 빈 배열로 두고 needsHumanReview를 true로 설정하세요. 근거를 지어내지 마세요.
+2-1. citations를 채울 때 label에는 근거 문서의 제목을, section에는 근거 문서에 표시된 위치
+   (예: "별표Ⅱ 2. 식료품(19개 업종)", "3. 용어의 정의 (p.4)")를 그대로 옮기세요. 위치를 임의로 지어내지 마세요.
+2-2. 근거 문서에는 공식 고시·법령과 사내 실무 매뉴얼이 섞여 있습니다. 사내 매뉴얼의 내용을 법령상 의무인 것처럼
+   말하지 말고, "점포 기준으로는", "매장 절차상"처럼 구분해서 안내하세요.
+2-3. citations의 quote에는 그 답변의 근거가 된 문장을 근거 문서 본문에서 **한 글자도 바꾸지 말고**
+   그대로 1~2문장 옮기세요. 요약하거나 말을 다듬으면 서버가 원문 대조에 실패해 근거 표시가 사라집니다.
+   본문에 그대로 옮길 만한 문장이 없는 문서는 아예 인용하지 마세요.
+3. sayNow는 1~2문장, 정중하고 짧게. 고객을 자극하는 표현은 doNot에 포함하세요.
+4. 대화에 위협·협박·반복 폭언이 있으면 situation을 threat 또는 emergency로, riskLevel을 높게 설정하세요.
+5. 확신이 낮거나(소음, 불명확한 발화 등) 정보가 부족하면 confidence를 낮추고 needsHumanReview를 true로 하세요.
+6. 실제로 일어난 발언만 근거로 삼고, 발화자가 하지 않은 말을 지어내지 마세요.
+7. 모든 출력(sayNow, nextActions, doNot, citations)은 **반드시 한국어**로만 작성하세요.
+   고객이 다른 언어로 말했거나 인식 결과에 외국어가 섞여 있어도 답변은 한국어로 씁니다.
+   영어 단어나 로마자 표기를 섞지 말고, 고유명사를 빼면 우리말 표현을 쓰세요.
+8. "자동 감지된 위험 표현"이 함께 주어지면 위험도 판단의 참고 신호로만 쓰세요.
+   그 단어를 sayNow에 되풀이해 적지 말고, 오탐일 수 있으니 실제 대화 맥락을 우선하세요.
+9. sayNow나 nextActions에 손님에게 사실 확인을 요청하는 내용(예: 소비기한 경과 여부, 영수증 유무,
+   파손 정도, 환불 사유 확인)이 있다면, 손님이 답할 법한 아주 짧은 구어체 문장 2~4개를
+   expectedReplies에 제시하세요. 서로 다른 결론(예: "상했어요" / "안 상했어요"처럼 반대되는 답)이
+   나오도록 다양하게 구성하세요. 사실 확인을 요청하는 내용이 전혀 없으면 expectedReplies는
+   빈 배열로 두세요. expectedReplies는 손님 입장의 말투로만 쓰고, 직원의 안내문이 되지 않게 하세요.
+10. 변질·파손·하자를 이유로 한 환불·교환 요구에서는, 그 원인이 판매자·제조사 쪽 하자인지 아니면
+    고객 본인의 보관·취급 부주의(예: 냉장 보관 표시 제품을 상온에 방치했다고 스스로 말한 경우) 때문인지
+    먼저 구분하세요. 고객 발화에 보관·취급 부주의를 시사하는 내용이 있으면 곧바로 교환·환급을
+    안내하지 말고, "소비자 귀책사유로 발생한 손상은 사업자가 책임지지 않을 수 있다"는 근거 문서
+    내용을 함께 반영해 보관 방법·방치 시간 등 사실관계부터 확인하도록 안내하세요. 이때도
+    "환불 안 해줘도 됩니다" 같은 확정적 판단은 하지 말고, "확인이 필요합니다"처럼 운영 안내 톤을
+    유지하세요.
+11. 여러 개를 구매해 그중 일부는 이미 먹거나 쓴 뒤 나머지에서 문제를 제기하는 경우, 전체 수량을
+    자동으로 환불 대상에 포함하지 마세요. 실제로 문제가 확인된 수량이 몇 개인지, 이미 먹거나 쓴
+    부분에서도 이상(맛·냄새·몸 상태 등)이 있었는지부터 확인하도록 nextActions에 넣으세요."""
+
+COMPACT_SYSTEM_PROMPT = """당신은 "응대가드 AI"의 응대 보조 엔진입니다. 고객응대근로자(편의점·서비스업 종사자)가 폭언·환불 분쟁·위협 상황에서
 안전하게 대응하도록 돕습니다. 다음 원칙을 반드시 지키세요.
 
 1. 당신은 법률 판단 기관이 아닙니다. "범죄가 성립한다", "고소 가능하다" 같은 확정적 법률 판단을 하지 마세요.
@@ -52,7 +93,9 @@ SYSTEM_PROMPT = """당신은 "응대가드 AI"의 응대 보조 엔진입니다.
    전체 35자 이내를 목표로 하세요. 완전한 문장보다 행동 키워드를 우선하고 법률 설명이나 긴 부연은 넣지 마세요.
    ttsText는 직원에게 행동 순서를 알려주는 자연스러운 내부 코칭 한 문장으로, 50자 이내를 목표로 하세요.
    ttsText에는 목록 기호, 화살표, 괄호를 사용하지 마세요. 세 문장은 같은 대응 순서와 내용을 가리켜야 하며
-   서로 모순되면 안 됩니다. 고객을 자극하는 표현은 doNot에 포함하세요.
+   서로 모순되면 안 됩니다. glanceSummary는 sayNow, nextActions와 제공된 근거 문서에 없는 사실을
+   추가하면 안 됩니다. 근거 문서가 없으면 법률상 권리, 책임 또는 환불 가능 여부를 확정적으로
+   요약하면 안 됩니다. 고객을 자극하는 표현은 doNot에 포함하세요.
 4. 대화에 위협·협박·반복 폭언이 있으면 situation을 threat 또는 emergency로, riskLevel을 높게 설정하세요.
 5. 확신이 낮거나(소음, 불명확한 발화 등) 정보가 부족하면 confidence를 낮추고 needsHumanReview를 true로 하세요.
 6. 실제로 일어난 발언만 근거로 삼고, 발화자가 하지 않은 말을 지어내지 마세요.
@@ -104,6 +147,7 @@ class GraphState(TypedDict):
     recent_transcript: list[TranscriptTurn]
     recent_situations: list[str]
     latest_text: str
+    response_mode: ResponseMode
     retrieved: list[Document]
     recommendation: Recommendation | None
 
@@ -124,11 +168,21 @@ def route_after_entry(state: GraphState) -> str:
 
 def fixed_safety_node(state: GraphState) -> dict:
     draft = build_fixed_safety_recommendation(state["latest_text"])
+    response_mode = state["response_mode"]
     recommendation = Recommendation(
-        **draft.model_dump(),
+        **draft.model_dump(
+            exclude=(
+                {"citations", "glanceSummary", "ttsText"}
+                if response_mode == "full"
+                else {"citations"}
+            )
+        ),
+        # 안전 절차 인용은 검색·LLM을 거치지 않으며 sourceType도 그대로 보존한다.
+        citations=draft.citations,
         id=_next_id(),
         createdAtMs=_now_ms(),
         isFixedSafetyScript=True,
+        responseMode=response_mode,
     )
     return {"recommendation": recommendation}
 
@@ -317,11 +371,18 @@ def _build_user_prompt(state: GraphState) -> str:
 
 def generate_node(state: GraphState) -> dict:
     llm = ChatOpenAI(model=CHAT_MODEL, api_key=OPENAI_API_KEY, temperature=0.2)
-    structured_llm = llm.with_structured_output(RecommendationDraft)
+    response_mode = state["response_mode"]
+    draft_model = (
+        CompactRecommendationDraft if response_mode == "compact" else FullRecommendationDraft
+    )
+    system_prompt = (
+        COMPACT_SYSTEM_PROMPT if response_mode == "compact" else FULL_SYSTEM_PROMPT
+    )
+    structured_llm = llm.with_structured_output(draft_model)
 
-    draft: RecommendationDraft = structured_llm.invoke(
+    draft: FullRecommendationDraft | CompactRecommendationDraft = structured_llm.invoke(
         [
-            SystemMessage(content=SYSTEM_PROMPT),
+            SystemMessage(content=system_prompt),
             HumanMessage(content=_build_user_prompt(state)),
         ]
     )
@@ -334,6 +395,7 @@ def generate_node(state: GraphState) -> dict:
         id=_next_id(),
         createdAtMs=_now_ms(),
         isFixedSafetyScript=False,
+        responseMode=response_mode,
     )
     return {"recommendation": recommendation}
 
@@ -361,6 +423,7 @@ def run_recommendation_graph(
     recent_transcript: list[TranscriptTurn],
     recent_situations: list[str],
     latest_text: str,
+    response_mode: ResponseMode = "full",
 ) -> Recommendation:
     result = recommendation_graph.invoke(
         {
@@ -369,6 +432,7 @@ def run_recommendation_graph(
             "recent_transcript": recent_transcript,
             "recent_situations": recent_situations,
             "latest_text": latest_text,
+            "response_mode": response_mode,
             "retrieved": [],
             "recommendation": None,
         }
